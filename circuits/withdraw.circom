@@ -1,4 +1,5 @@
 include "../node_modules/circomlib/circuits/bitify.circom";
+include "../node_modules/circomlib/circuits/comparators.circom";
 include "../node_modules/circomlib/circuits/pedersen.circom";
 include "merkleTree.circom";
 
@@ -25,10 +26,33 @@ template CommitmentHasher() {
     nullifierHash <== nullifierHasher.out[0];
 }
 
+// Returns 1 if the two lists are exactly equal, 0 otherwise
+template ListEqual(length) {
+    signal input paths[2][length];
+    signal output out;
+
+    component indexEq[length];
+    var sum = 0;
+    for (var i = 0; i < length; i++) {
+        indexEq[i] = IsEqual();
+        indexEq.in[0] <== paths[0][i];
+        indexEq.in[1] <== paths[1][i];
+        sum += indexEq.out;
+    }
+    signal sout <== sum;
+
+    component allEqual = IsEqual();
+    allEqual.in[0] <== sout;
+    allEqual.in[1] <== levels;
+    out <== allEqual.out;
+}
+
 // Verifies that commitment that corresponds to given secret and nullifier is included in the merkle tree of deposits
-template Withdraw(levels) {
+// Verifies that the commitment is not in a blacklist, where the blacklist is defined by a hash to reduce onchain publication costs
+template Withdraw(levels, blacklistLength) {
     signal input root;
     signal input nullifierHash;
+    signal input blacklistHash;
     signal input recipient; // not taking part in any computations
     signal input relayer;  // not taking part in any computations
     signal input fee;      // not taking part in any computations
@@ -37,6 +61,7 @@ template Withdraw(levels) {
     signal private input secret;
     signal private input pathElements[levels];
     signal private input pathIndices[levels];
+    signal private input blacklist[blacklistLength][levels];
 
     component hasher = CommitmentHasher();
     hasher.nullifier <== nullifier;
@@ -51,6 +76,26 @@ template Withdraw(levels) {
         tree.pathIndices[i] <== pathIndices[i];
     }
 
+    // Make sure the merkle proof isn't on the blacklist
+    component samepath[blacklistLength];
+    for (var i = 0; i < blacklistLength) {
+        samePath[i] = ListEqual(levels);
+        for (var j = 0; j < levels; j++) {
+            samePath.in[0][j] <== pathIndices[j];
+            samePath.in[1][j] <== blackList[i][j];
+        }
+        samePath[i].out === 0;
+    }
+
+    // Make sure the blacklist hash matches the blacklist
+    component blacklistHasher = Pedersen(blacklist * levels);
+    for (var i = 0; i < blacklistLength) {
+        for (var j = 0; j < levels; j++) {
+            blacklistHasher[i*j + j] <== blacklist[i][j];
+        }
+    }
+    blacklistHasher.out[0] === blacklistHash;
+
     // Add hidden signals to make sure that tampering with recipient or fee will invalidate the snark proof
     // Most likely it is not required, but it's better to stay on the safe side and it only takes 2 constraints
     // Squares are used to prevent optimizer from removing those constraints
@@ -64,4 +109,4 @@ template Withdraw(levels) {
     refundSquare <== refund * refund;
 }
 
-component main = Withdraw(20);
+component main = Withdraw(20, 1000);
